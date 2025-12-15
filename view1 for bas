@@ -1,0 +1,33 @@
+<mvc:View
+    controllerName="zjeacc.controller.View1"
+    xmlns:mvc="sap.ui.core.mvc"
+    xmlns="sap.m">
+
+    <Page id="idPage" title="GRN Print">
+        <content>
+            <VBox id="idMainVBox" class="sapUiSmallMargin">
+                
+                <Label id="idMatDocLabel" text="Material Document Number" />
+                <Input
+                    id="idMatDocInput"
+                    placeholder="Enter Material Document Number"
+                    width="20%" />
+
+                <Label id="idYearLabel" text="Year" class="sapUiSmallMarginTop" />
+                <Input
+                    id="idYearInput"
+                    placeholder="Enter Year"
+                    width="20%" />
+
+                <Button
+                    id="idPrintButton"
+                    text="Print"
+                    icon="sap-icon://print"
+                    type="Emphasized"
+                    class="sapUiSmallMarginTop"
+                    press=".onPrint" />
+                    
+            </VBox>
+        </content>
+    </Page>
+</mvc:View>
