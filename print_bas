@@ -1,0 +1,322 @@
+sap.ui.define([
+    "sap/m/MessageToast",
+    "sap/m/Dialog",
+    "sap/m/Label",
+    "sap/m/Input",
+    "sap/m/Button",
+    "sap/m/MessageBox",
+    "sap/ui/export/Spreadsheet"
+], function (MessageToast, Dialog, Label, Input, Button, MessageBox, Spreadsheet) {
+    "use strict";
+
+    const formatDate = (dateStr) => {
+        if (!dateStr) return "";
+        const date = new Date(dateStr);
+        const day = String(date.getDate()).padStart(2, '0');
+        const month = String(date.getMonth() + 1).padStart(2, '0'); // Months are 0-based
+        const year = date.getFullYear();
+        return `${day}-${month}-${year}`;
+    };
+
+    const getFilterByPath = (filters, targetPath) => {
+        for (let filter of filters) {
+            if (filter.sPath === targetPath) {
+                return filter;
+            } else if (filter.aFilters) {
+                const nestedFilter = getFilterByPath(filter.aFilters, targetPath);
+                if (nestedFilter) {
+                    return nestedFilter;
+                }
+            }
+        }
+        return null; // Return null if the target filter is not found
+    };
+
+    return {
+        getInterestRate: function (callback) {
+            const sUniqueId = `interestRateInput_${Date.now()}`;
+            const oDialog = new Dialog({
+                title: "Enter Interest Rate",
+                content: [
+                    new Label({ text: "Interest Rate (%):", labelFor: sUniqueId }),
+                    new Input(sUniqueId, {
+                        type: "Number",
+                        placeholder: "Enter interest rate (e.g., 5)"
+                    })
+                ],
+                beginButton: new Button({
+                    text: "OK",
+                    press: () => {
+                        const sInterestRate = sap.ui.getCore().byId(sUniqueId).getValue();
+                        if (sInterestRate && !isNaN(sInterestRate)) {
+                            oDialog.close();
+                            callback(parseFloat(sInterestRate));
+                        } else {
+                            MessageBox.error("Please enter a valid interest rate.");
+                        }
+                    }
+                }),
+                endButton: new Button({
+                    text: "Cancel",
+                    press: () => oDialog.close()
+                })
+            });
+
+            oDialog.open();
+        },
+
+        fn_Print: function () {
+            this.getInterestRate((interestRate) => {
+                this._fetchData((aRecords, aOpeningData, postingDateLow, postingDateHigh) => {
+                    this._printReport(interestRate, aRecords, aOpeningData, postingDateLow, postingDateHigh);
+                });
+            });
+        },
+
+        fn_Excel: function () {
+            this.getInterestRate((interestRate) => {
+                this._fetchData((aRecords, aOpeningData, postingDateLow, postingDateHigh) => {
+                    this._exportToExcel(interestRate, aRecords, aOpeningData, postingDateLow, postingDateHigh);
+                });
+            });
+        },
+
+        _fetchData: function (callback) {
+            const oModel = this.getView().getModel();
+            const oSmartFilterBar = this.getView().byId("zuifiglinterest::sap.suite.ui.generic.template.ListReport.view.ListReport::ZI_FI_GLOPENINGBAL--listReportFilter");
+
+            if (!oModel) {
+                MessageToast.show("OData model not found.");
+                return;
+            }
+
+            if (!oSmartFilterBar) {
+                MessageToast.show("Smart Filter Bar not found.");
+                return;
+            }
+
+            const aFilters = oSmartFilterBar.getFilters();
+            const postingDateFilter = getFilterByPath(aFilters, "PostingDate");
+            const GlFilter = getFilterByPath(aFilters, "GLAccount");
+
+            if (!postingDateFilter) {
+                MessageToast.show("Posting Date filter not found.");
+                return;
+            }
+
+            if (!GlFilter) {
+                MessageToast.show("GL Account filter not found.");
+                return;
+            }
+            const glAccountValue = encodeURIComponent(GlFilter.oValue1);
+
+            const postingDateLow = postingDateFilter.oValue1;
+            const postingDateHigh = postingDateFilter.oValue2;
+
+            const previousDate = new Date(postingDateLow);
+            previousDate.setDate(previousDate.getDate() - 1); // Subtract one day
+            const p_Date = previousDate.toISOString().split("T")[0]; // Format as YYYY-MM-DD
+
+            let iTop = 2000; // Number of records per batch
+            let iSkip = 0; // Offset for records
+            let aAllData = [];
+            let aAllOpeningData = [];
+
+            const additionalFilters = new sap.ui.model.Filter({
+                filters: [
+                    new sap.ui.model.Filter("GLAccount", "EQ", glAccountValue)
+                ],
+                and: true
+            });
+
+            const sEntitySetB = `/ZI_FI_GLOPENINGBAL_B(p_fromdt=datetime%27${encodeURIComponent(p_Date)}T00%3A00%3A00%27)/Results`;
+
+            const fetchOpening = function () {
+                oModel.read(sEntitySetB, {
+                    filters: [additionalFilters],
+                    success: function (oData) {
+                        aAllOpeningData = oData.results;
+                        fetchTransactions(); // Fetch transactions after fetching opening balances
+                    },
+                    error: function (oError) {
+                        MessageToast.show("Error retrieving opening balances.");
+                        console.error("Error fetching opening balances:", oError);
+                    }
+                });
+            };
+
+            const fetchTransactions = function () {
+                oModel.read("/ZI_FI_GLOPENINGBAL", {
+                    filters: aFilters,
+                    urlParameters: {
+                        "$top": iTop.toString(),
+                        "$skip": iSkip.toString()
+                    },
+                    success: function (oData) {
+                        aAllData = aAllData.concat(oData.results);
+
+                        if (oData.results.length === iTop) {
+                            iSkip += iTop;
+                            fetchTransactions();
+                        } else {
+                            callback(aAllData, aAllOpeningData, postingDateLow, postingDateHigh);
+                        }
+                    },
+                    error: function (oError) {
+                        MessageToast.show("Error retrieving transactions.");
+                        console.error("Error fetching transactions:", oError);
+                    }
+                });
+            };
+
+            fetchOpening(); // Start fetching with opening balances
+        },
+
+        _printReport: function (interestRate, aRecords, aOpeningData, postingDateLow, postingDateHigh) {
+            if ((!aRecords || aRecords.length === 0) && (!aOpeningData || aOpeningData.length === 0)) {
+                MessageToast.show("No data available for printing.");
+                return;
+            }
+
+            let runningBalance = 0;
+            const combinedRecords = [...aOpeningData, ...aRecords].sort((a, b) => new Date(a.PostingDate) - new Date(b.PostingDate));
+            let htmlContent = `
+                <html>
+                <head>
+                    <title>GL Interest Calculation Report</title>
+                    <style>
+                        table {
+                            border-collapse: collapse;
+                            width: 100%;
+                        }
+                        th, td {
+                            border: 1px solid black;
+                            padding: 8px;
+                        }
+                        th {
+                            background-color: #f2f2f2;
+                            text-align: left;
+                        }
+                        td {
+                            text-align: left;
+                        }
+                        td.number {
+                            text-align: right;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h1>GL Interest Calculation Report</h1>
+                    <h2>Interest Rate: ${interestRate}%</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>GL Account</th>
+                                <th>Posting Date</th>
+                                <th>Days</th>
+                                <th>Amount</th>
+                                <th>Running Balance</th>
+                                <th>Interest Amount</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+
+            combinedRecords.forEach((entry, index) => {
+                const amount = parseFloat(entry.OpeningBal || 0);
+                let daysDifference = 0;
+
+                if (index < combinedRecords.length - 1) {
+                    const currentDate = new Date(entry.PostingDate || postingDateLow);
+                    const nextDate = new Date(combinedRecords[index + 1].PostingDate || postingDateLow);
+                    daysDifference = Math.floor((nextDate - currentDate) / (1000 * 60 * 60 * 24));
+                } else {
+                    const currentDate = new Date(entry.PostingDate || postingDateLow);
+                    const highDate = new Date(postingDateHigh);
+                    daysDifference = Math.floor((highDate - currentDate) / (1000 * 60 * 60 * 24));
+                }
+
+                runningBalance += amount;
+                const interestAmount = (runningBalance * (interestRate / 100) * daysDifference) / 365;
+
+                htmlContent += `
+                    <tr>
+                        <td>${entry.GLAccount || ""}</td>
+                        <td>${formatDate(entry.PostingDate)}</td>
+                        <td class="number">${daysDifference}</td>
+                        <td class="number">${amount.toFixed(2)}</td>
+                        <td class="number">${runningBalance.toFixed(2)}</td>
+                        <td class="number">${interestAmount.toFixed(2)}</td>
+                    </tr>`;
+            });
+
+            htmlContent += `</tbody></table></body></html>`;
+
+            const newWindow = window.open("", "_blank");
+            if (newWindow) {
+                newWindow.document.write(htmlContent);
+                newWindow.document.close();
+                newWindow.print();
+            }
+        },
+
+        _exportToExcel: function (interestRate, aRecords, aOpeningData, postingDateLow, postingDateHigh) {
+            if ((!aRecords || aRecords.length === 0) && (!aOpeningData || aOpeningData.length === 0)) {
+                MessageToast.show("No data available for export.");
+                return;
+            }
+
+            let runningBalance = 0;
+            const combinedRecords = [...aOpeningData, ...aRecords].sort((a, b) => new Date(a.PostingDate) - new Date(b.PostingDate));
+            const aExportData = combinedRecords.map((entry, index) => {
+                const amount = parseFloat(entry.OpeningBal || 0);
+                let daysDifference = 0;
+
+                if (index < combinedRecords.length - 1) {
+                    const currentDate = new Date(entry.PostingDate || postingDateLow);
+                    const nextDate = new Date(combinedRecords[index + 1].PostingDate || postingDateLow);
+                    daysDifference = Math.floor((nextDate - currentDate) / (1000 * 60 * 60 * 24));
+                } else {
+                    const currentDate = new Date(entry.PostingDate || postingDateLow);
+                    const highDate = new Date(postingDateHigh);
+                    daysDifference = Math.floor((highDate - currentDate) / (1000 * 60 * 60 * 24));
+                }
+
+                runningBalance += amount;
+                const interestAmount = (runningBalance * (interestRate / 100) * daysDifference) / 365;
+
+                return {
+                    GLAccount: entry.GLAccount,
+                    PostingDate: formatDate(entry.PostingDate),
+                    Days: daysDifference,
+                    Amount: amount.toFixed(2),
+                    RunningBalance: runningBalance.toFixed(2),
+                    InterestAmount: interestAmount.toFixed(2)
+                };
+            });
+
+            const aColumns = [
+                { label: "GL Account", property: "GLAccount" },
+                { label: "Posting Date", property: "PostingDate" },
+                { label: "Days", property: "Days" },
+                { label: "Amount", property: "Amount" },
+                { label: "Running Balance", property: "RunningBalance" },
+                { label: "Interest Amount", property: "InterestAmount" }
+            ];
+
+            const oSettings = {
+                workbook: { columns: aColumns },
+                dataSource: aExportData,
+                fileName: "GL_Report.xlsx"
+            };
+
+            const oSpreadsheet = new Spreadsheet(oSettings);
+            oSpreadsheet.build()
+                .then(() => {
+                    MessageToast.show("Excel file downloaded successfully.");
+                })
+                .catch((error) => {
+                    MessageBox.error("Error exporting to Excel: " + error.message);
+                });
+        }
+    };
+});
